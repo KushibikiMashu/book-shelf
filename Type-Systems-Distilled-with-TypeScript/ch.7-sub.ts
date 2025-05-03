@@ -1,4 +1,4 @@
-import { error, parseRecFunc } from "npm:tiny-ts-parser";
+import { error, parseRecFunc, parseSub } from "npm:tiny-ts-parser";
 
 // 部分型付けを追加
 // - 型 A が型 B の部分型なら、型 () => A は型 () => B の部分型としてよい（共変（返り値））
@@ -8,7 +8,6 @@ import { error, parseRecFunc } from "npm:tiny-ts-parser";
 type Term = 
     | { tag: "true" }
     | { tag: "false" }
-    | { tag: "if"; cond: Term; thn: Term; els: Term }
     | { tag: "number"; n: number }
     | { tag: "add"; left: Term; right: Term }
     | { tag: "var"; name: string } // 変数参照
@@ -64,10 +63,35 @@ function typeEq(ty1: Type, ty2: Type): boolean {
     }
 }
 
+// ty1 が ty2 の部分型であるか
 function subType(ty1: Type, ty2: Type): boolean {
-
-    
-
+    switch (ty2.tag) {
+        case "Boolean":
+            return ty1.tag === "Boolean"
+        case "Number":
+            return ty1.tag === "Number"
+        case "Func": {
+            if (ty1.tag !== "Func") return false
+            if (ty1.params.length !== ty2.params.length) return false
+            for (let i = 0; i < ty1.params.length; i++) {
+                if (!subType(ty2.params[i].type, ty1.params[i].type)) {
+                    return false // contravariant
+                }
+            }
+            if (!subType(ty1.retType, ty2.retType)) return false
+            return true
+        }
+        case "Object": {
+            // ty1がty2の部分型であるためには、ty2のプロパティを全て持つ必要がある
+            if (ty1.tag !== "Object") return false
+            for (const prop2 of ty2.props) {
+                const prop1 = ty1.props.find((prop1) => prop1.name === prop2.name)
+                if (!prop1) return false
+                if (!subType(prop1.type, prop2.type)) return false
+            }
+            return true
+        }
+    }
     throw "subType error"
 }
 
@@ -81,18 +105,6 @@ function typecheck(t: Term, tyEnv: TypeEnv): Type {
             return { tag: "Boolean" }
         case "false":
             return { tag: "Boolean" }
-        case "if": {
-            const condTy = typecheck(t.cond, tyEnv)
-            if (condTy.tag !== "Boolean") {
-                error("boolean expected", t.cond)
-            }
-            const thnTy = typecheck(t.thn, tyEnv)
-            const elsTy = typecheck(t.els, tyEnv)
-            if (!typeEq(thnTy, elsTy)) {
-                error("then and else have different types", t)
-            }
-            return thnTy
-        }
         case "number":
             return { tag: "Number" }
         case "add": {
@@ -126,8 +138,8 @@ function typecheck(t: Term, tyEnv: TypeEnv): Type {
             if (funcTy.params.length !== t.args.length) error("wrong number of arguments", t)
             for (let i = 0; i < t.args.length; i++) {
                 const argTy = typecheck(t.args[i], tyEnv)
-                const isParamAndArgSameType = typeEq(funcTy.params[i].type, argTy)
-                if (!isParamAndArgSameType) error("parameter type mismatch", t.args[i])
+                const isArgSubTypeOfParam = subType(argTy, funcTy.params[i].type)
+                if (!isArgSubTypeOfParam) error("parameter type mismatch", t.args[i])
             }
             return funcTy.retType
         }
@@ -172,7 +184,7 @@ function typecheck(t: Term, tyEnv: TypeEnv): Type {
 
 const check = (code: string) => {
     try {
-        return typecheck(parseRecFunc(code), {})
+        return typecheck(parseSub(code), {})
     } catch(e: any) {
         const msg = e?.message || e
         return `error: ${msg}`
@@ -180,17 +192,34 @@ const check = (code: string) => {
 }
 const out = (x: any) => console.dir(x, {depth: null})
 
-// {
-//   tag: "Func",
-//   params: [ { name: "x", type: { tag: "Number" } } ],
-//   retType: { tag: "Number" }
-// }
+// { tag: "Number" }
 out(check(`
-    function f(x: number): number { return f(x); }; f
+  const f = (x: { foo: number }) => x.foo;
+  const x = { foo: 1, bar: true };
+  f(x);
+`))
+
+// error: test.ts:7:5-7:6 parameter type mismatch
+out(check(`
+  type F = () => { foo: number; bar: boolean };
+ 
+  const f = (x: F) => x().bar;
+  const g = () => ({ foo: 1 });
+ 
+  f(g);
 `))
 
 // { tag: "Number" }
 out(check(`
-    function f(x: number): number { return f(x); };
-    f(0)
+  const f = (x: { foo: { bar: number } }) => x.foo.bar;
+ 
+  f({ foo: { bar: 1, baz: true }});
 `))
+
+// error: test.ts:4:5-4:23 parameter type mismatch
+out(check(`
+  const f = (x: { foo: { bar: number; baz: boolean } }) => x.foo.baz;
+ 
+  f({ foo: { bar: 1 }});
+`))
+
