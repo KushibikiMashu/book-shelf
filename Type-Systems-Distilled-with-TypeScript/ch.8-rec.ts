@@ -33,7 +33,65 @@ type Type =
 
 type PropertyType = { name: string; type: Type };
 
-function typeEq(ty1: Type, ty2: Type): boolean {
+// 型変数の対応関係（map）を使いながら、2つの型が構造的に一致するかを再帰的に判定する関数
+function typeEqNaive(ty1: Type, ty2: Type, map: Record<string, string>): boolean {
+    switch (ty2.tag) {
+        case "Boolean":
+        case "Number":
+            return ty1.tag === ty2.tag
+        case "Func": {
+            if (ty1.tag !== "Func") return false
+            // p.105 のサンプルコードからなぜか消えてた。必要だと思うけど...
+            // if (ty1.params.length !== ty2.params.length) return false
+            for (let i = 0; i < ty1.params.length; i++) {
+                const isSameParamType = typeEqNaive(ty1.params[i].type, ty2.params[i].type, map)
+                if (!isSameParamType) return false
+            }
+            const isSameRetType = typeEqNaive(ty1.retType, ty2.retType, map)
+            if (!isSameRetType) return false
+            return true
+        }
+        case "Object": {
+            if (ty1.tag !== "Object") return false
+            if (ty1.props.length !== ty2.props.length) return false
+            for (const prop1 of ty1.props) {
+                const prop2 = ty2.props.find((prop2) => prop1.name === prop2.name)
+                if (!prop2) return false
+                const isSamePropType = typeEqNaive(prop1.type, prop2.type, map)
+                if (!isSamePropType) return false
+            }
+            return true
+        }
+        case "TypeVar": {
+            if (ty1.tag !== "TypeVar") return false
+            if (typeof map[ty1.name] === "undefined") {
+                throw `unknown type variable: ${ty1.name}`
+            }
+            return map[ty1.name] === ty2.name
+        }
+        case "Rec": {
+            if (ty1.tag !== "Rec") return false
+            const newMap = { ...map, [ty1.name]: ty2.name }
+            return typeEqNaive(ty1.type, ty2.type, newMap)
+        }
+        default:
+            throw "typeEq error"
+    }
+}
+
+// 再帰型の展開と既知の比較履歴を考慮しながら、2つの型が構造的に等しいかどうかを判定する関数
+function typeEqSub(ty1: Type, ty2: Type, seen: [Type, Type][]): boolean {
+    for (const [ty1_, ty2_] of seen) {
+        const haveTypesSeen = typeEqNaive(ty1_, ty1, {}) && typeEqNaive(ty2_, ty2, {})
+        if (haveTypesSeen) return true
+    }
+    if (ty1.tag === "Rec") {
+        return typeEqSub(simplifyType(ty1), ty2, [...seen, [ty1, ty2]])
+    }
+    if (ty2.tag === "Rec") {
+        return typeEqSub(ty1, simplifyType(ty2), [...seen, [ty1, ty2]])
+    }
+
     switch (ty2.tag) {
         case "Boolean":
             return ty1.tag === "Boolean"
@@ -43,10 +101,10 @@ function typeEq(ty1: Type, ty2: Type): boolean {
             if (ty1.tag !== "Func") return false
             if (ty1.params.length !== ty2.params.length) return false
             for (let i = 0; i < ty1.params.length; i++) {
-                const isSameParamType = typeEq(ty1.params[i].type, ty2.params[i].type)
+                const isSameParamType = typeEqSub(ty1.params[i].type, ty2.params[i].type, seen)
                 if (!isSameParamType) return false
             }
-            const isSameRetType = typeEq(ty1.retType, ty2.retType)
+            const isSameRetType = typeEqSub(ty1.retType, ty2.retType, seen)
             if (!isSameRetType) return false
             return true
         }
@@ -56,17 +114,23 @@ function typeEq(ty1: Type, ty2: Type): boolean {
             for (const prop2 of ty2.props) {
                 const prop1 = ty1.props.find((prop1) => prop1.name === prop2.name)
                 if (!prop1) return false
-                const isSamePropType = typeEq(prop1.type, prop2.type)
+                const isSamePropType = typeEqSub(prop1.type, prop2.type, seen)
                 if (!isSamePropType) return false
             }
             return true
         }
+        case "TypeVar":
+            throw "unreachable"
         default:
             throw "typeEq error"
     }
 }
 
-// 型 ty を型名 tyVarName に置き換える関数
+function typeEq(ty1: Type, ty2: Type): boolean {
+    return typeEqSub(ty1, ty2, [])
+}
+
+// 型 ty の中で指定された型変数 tyVarName を別の型 repTy に再帰的に置き換える関数
 function expandType(ty: Type, tyVarName: string, repTy: Type): Type {
     switch (ty.tag) {
         case "Boolean":
@@ -111,18 +175,6 @@ function simplifyType(ty: Type): Type {
     }
 }
 
-function typeEqNaive(ty1: Type, ty2: Type, map: Record<string, string>): boolean {
-    switch (ty2.tag) {
-        case "Boolean":
-        case "Number":
-            return ty1.tag === ty2.tag
-        case "Func":
-            // wip
-            // p.105
-    }
-}
-
-// 型環境: 変数が現在どういう型を持っているか
 type TypeEnv = Record<string, Type>
 
 // Term -> Type
@@ -133,7 +185,7 @@ function typecheck(t: Term, tyEnv: TypeEnv): Type {
         case "false":
             return { tag: "Boolean" }
         case "if": {
-            const condTy = typecheck(t.cond, tyEnv)
+            const condTy = simplifyType(typecheck(t.cond, tyEnv))
             if (condTy.tag !== "Boolean") {
                 error("boolean expected", t.cond)
             }
@@ -147,11 +199,11 @@ function typecheck(t: Term, tyEnv: TypeEnv): Type {
         case "number":
             return { tag: "Number" }
         case "add": {
-            const leftTy = typecheck(t.left, tyEnv)
+            const leftTy = simplifyType(typecheck(t.left, tyEnv))
             if (leftTy.tag !== "Number") {
                 error("number expected", t.left)
             }
-            const rightTy = typecheck(t.right, tyEnv)
+            const rightTy = simplifyType(typecheck(t.right, tyEnv))
             if (rightTy.tag !== "Number") {
                 error("number expected", t.right)
             }
@@ -172,7 +224,7 @@ function typecheck(t: Term, tyEnv: TypeEnv): Type {
             return { tag: "Func", params: t.params, retType }
         }
         case "call": {
-            const funcTy = typecheck(t.func, tyEnv)
+            const funcTy = simplifyType(typecheck(t.func, tyEnv))
             if (funcTy.tag !== "Func") error("function type expected", t.func)
             if (funcTy.params.length !== t.args.length) error("wrong number of arguments", t)
             for (let i = 0; i < t.args.length; i++) {
@@ -198,7 +250,7 @@ function typecheck(t: Term, tyEnv: TypeEnv): Type {
             return { tag: "Object", props }
         }
         case "objectGet": {
-            const objectTy = typecheck(t.obj, tyEnv)
+            const objectTy = simplifyType(typecheck(t.obj, tyEnv))
             if (objectTy.tag !== "Object") error("object type expected", t.obj)
             const prop = objectTy.props.find((prop) => prop.name === t.propName)
             if (!prop) error(`unknown property name: ${t.propName}`, t)
@@ -231,3 +283,33 @@ const check = (code: string) => {
 }
 const out = (x: any) => console.dir(x, {depth: null})
 
+// {
+//   tag: "Rec",
+//   name: "NumStream",
+//   type: {
+//     tag: "Object",
+//     props: [
+//       { name: "num", type: { tag: "Number" } },
+//       {
+//         name: "rest",
+//         type: {
+//           tag: "Func",
+//           params: [],
+//           retType: { tag: "TypeVar", name: "NumStream" }
+//         }
+//       }
+//     ]
+//   }
+// }
+out(check(`
+  type NumStream = { num: number; rest: () => NumStream };
+ 
+  function numbers(n: number): NumStream {
+    return { num: n, rest: () => numbers(n + 1) };
+  }
+ 
+  const ns1 = numbers(1);
+  const ns2 = (ns1.rest)();
+  const ns3 = (ns2.rest)();
+  ns3
+`))
