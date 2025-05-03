@@ -1,4 +1,4 @@
-import { error, parseRecFunc, parseSub } from "npm:tiny-ts-parser";
+import { error, parseSub } from "npm:tiny-ts-parser";
 
 // 部分型付けを追加
 // - 型 A が型 B の部分型なら、型 () => A は型 () => B の部分型としてよい（共変（返り値））
